@@ -14,8 +14,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # === 設定 ===
-OPML_PATH = os.path.expanduser("~/Downloads/Inoreader Feeds 20260410.xml")
-STATE_FILE = os.path.expanduser("~/Downloads/claudecode/rss-watcher/seen_articles.json")
+_SCRIPT_DIR = Path(__file__).parent
+OPML_PATH = str(_SCRIPT_DIR / "inoreader_feeds.xml")
+STATE_FILE = str(_SCRIPT_DIR / "seen_articles.json")
 SLACK_USER_ID = "U7VTCQ0SF"
 
 # 優先カテゴリ（フィードを巡回する対象）
