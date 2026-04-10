@@ -133,6 +133,7 @@ def fetch_articles(feeds, seen_ids, hours_back=168):
                     "id": article_id,
                     "title": title,
                     "link": link,
+                    "summary": summary,
                     "category": feed_info["category"],
                     "feed": feed_info["title"],
                     "score": score,
@@ -146,6 +147,26 @@ def fetch_articles(feeds, seen_ids, hours_back=168):
     return sorted(articles, key=lambda x: x["score"], reverse=True)
 
 
+def format_article_block(a):
+    """記事1件のフォーマット: タイトルリンク + 概要3行"""
+    summary = a.get("summary", "").strip()
+    # 概要を最大3行・120文字に収める
+    if summary:
+        lines = summary.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        lines = [l.strip() for l in lines if l.strip()]
+        summary_text = " / ".join(lines[:3])
+        if len(summary_text) > 120:
+            summary_text = summary_text[:117] + "..."
+    else:
+        summary_text = ""
+
+    block = f"*<{a['link']}|{a['title']}>*"
+    if summary_text:
+        block += f"\n　{summary_text}"
+    block += f"\n　`{a['category']}` score:{a['score']}"
+    return block
+
+
 def format_weekly_digest(articles):
     if not articles:
         return "今週は注目記事がありませんでした。"
@@ -157,33 +178,41 @@ def format_weekly_digest(articles):
     if urgent:
         lines.append("🚨 *緊急・重要*")
         for a in urgent[:5]:
-            lines.append(f"• [{a['title']}]({a['link']}) `{a['category']}` score:{a['score']}")
+            lines.append(format_article_block(a))
+            lines.append("")
         lines.append("")
 
     high = [a for a in articles if not a["urgent"] and a["score"] >= 5]
     if high:
         lines.append("⭐ *注目記事*")
         for a in high[:8]:
-            lines.append(f"• [{a['title']}]({a['link']}) `{a['category']}` score:{a['score']}")
+            lines.append(format_article_block(a))
+            lines.append("")
         lines.append("")
 
     mid = [a for a in articles if not a["urgent"] and 3 <= a["score"] < 5]
     if mid:
         lines.append("📌 *その他気になる記事*")
         for a in mid[:5]:
-            lines.append(f"• [{a['title']}]({a['link']}) `{a['category']}`")
+            lines.append(format_article_block(a))
+            lines.append("")
 
     return "\n".join(lines)
 
 
 def format_urgent_alert(article):
-    return (
+    summary = article.get("summary", "").strip()
+    if summary and len(summary) > 120:
+        summary = summary[:117] + "..."
+    body = (
         f"🚨 *緊急アラート*\n"
-        f"*{article['title']}*\n"
-        f"{article['link']}\n"
-        f"カテゴリ: {article['category']} | スコア: {article['score']}\n"
-        f"キーワード: {', '.join(article['matched'])}"
+        f"*<{article['link']}|{article['title']}>*\n"
     )
+    if summary:
+        body += f"　{summary}\n"
+    body += f"カテゴリ: {article['category']} | スコア: {article['score']}\n"
+    body += f"キーワード: {', '.join(article['matched'])}"
+    return body
 
 
 def post_to_slack(message):
