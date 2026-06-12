@@ -33,11 +33,24 @@ SCORE_KEYWORDS = {
     "ASD": 2, "ADHD": 2, "報酬改定": 3, "加算": 2, "処遇改善": 2,
     "障害福祉": 2, "ヒトツナ": 3, "LITALICO": 2,
     # 事業・戦略（+2点）
-    "採用": 2, "DX": 2, "テクノロジー": 1, "スタートアップ": 1,
+    "DX": 2, "テクノロジー": 1, "スタートアップ": 1,
     "差別化": 2, "営業": 1, "提案": 1,
     # 競合（+3点）
     "コドモン": 3, "CoDMON": 3, "おうちえん": 3, "バスキャッチ": 3,
     "スマートエデュケーション": 3, "メモリッジ": 3, "フォトクリ": 3,
+}
+
+# 除外キーワード（タイトルにこれが含まれる記事はスキップ）
+EXCLUDE_KEYWORDS = [
+    "求人", "採用情報", "転職", "募集情報", "正社員", "パート", "アルバイト",
+    "開業ガイド", "開業方法",
+]
+
+# URLパターンによるスコア補正（Googleリダイレクト経由も考慮）
+URL_SCORE_PENALTY = {
+    "youtube.com": -5,
+    "youtu.be": -5,
+    "youtube.com%2Fwatch": -5,  # Googleリダイレクト経由
 }
 
 # 緊急キーワード（これがあれば即時通知）
@@ -85,7 +98,11 @@ def parse_opml_feeds():
     return feeds
 
 
-def score_article(title, summary=""):
+def is_excluded(title):
+    return any(kw in title for kw in EXCLUDE_KEYWORDS)
+
+
+def score_article(title, summary="", link=""):
     text = (title + " " + summary).lower()
     score = 0
     matched = []
@@ -93,6 +110,9 @@ def score_article(title, summary=""):
         if kw.lower() in text:
             score += pts
             matched.append(kw)
+    for url_pattern, penalty in URL_SCORE_PENALTY.items():
+        if url_pattern in link:
+            score += penalty
     return score, matched
 
 
@@ -125,8 +145,11 @@ def fetch_articles(feeds, seen_ids, hours_back=168):
                 summary = entry.get("summary", "")[:200]
                 link = entry.get("link", "")
 
-                score, matched = score_article(title, summary)
-                if score < 3:
+                if is_excluded(title):
+                    continue
+
+                score, matched = score_article(title, summary, link)
+                if score < 2:
                     continue
 
                 articles.append({
@@ -172,7 +195,7 @@ def format_weekly_digest(articles):
         return "今週は注目記事がありませんでした。"
 
     lines = [f"📰 *今週の業界情報まとめ* （{datetime.now(JST).strftime('%Y/%m/%d')}）\n"]
-    lines.append(f"スコア3以上の記事: {len(articles)}件\n")
+    lines.append(f"スコア2以上の記事: {len(articles)}件\n")
 
     urgent = [a for a in articles if a["urgent"]]
     if urgent:
@@ -190,7 +213,7 @@ def format_weekly_digest(articles):
             lines.append("")
         lines.append("")
 
-    mid = [a for a in articles if not a["urgent"] and 3 <= a["score"] < 5]
+    mid = [a for a in articles if not a["urgent"] and 2 <= a["score"] < 5]
     if mid:
         lines.append("📌 *その他気になる記事*")
         for a in mid[:5]:
@@ -223,15 +246,14 @@ def post_to_slack(message):
 
 
 def main(mode="weekly"):
-    seen = load_seen_articles()
+    # weekly は毎回フレッシュ実行（seen_articles不使用）
+    seen = set() if mode == "weekly" else load_seen_articles()
     feeds = parse_opml_feeds()
     print(f"対象フィード: {len(feeds)}件", file=sys.stderr)
 
     hours = 168 if mode == "weekly" else 1  # weekly=7日分、urgent=1時間分
     articles = fetch_articles(feeds, seen, hours_back=hours)
-    print(f"スコア3以上の記事: {len(articles)}件", file=sys.stderr)
-
-    new_ids = {a["id"] for a in articles}
+    print(f"スコア2以上の記事: {len(articles)}件", file=sys.stderr)
 
     if mode == "weekly":
         message = format_weekly_digest(articles)
@@ -242,10 +264,9 @@ def main(mode="weekly"):
             post_to_slack(format_urgent_alert(a))
         if not urgent:
             print("緊急記事なし", file=sys.stderr)
-
-    # 既読として保存
-    seen.update(new_ids)
-    save_seen_articles(seen)
+        new_ids = {a["id"] for a in articles}
+        seen.update(new_ids)
+        save_seen_articles(seen)
 
 
 if __name__ == "__main__":
