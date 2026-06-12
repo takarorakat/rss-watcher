@@ -1,0 +1,25 @@
+name: RSS Weekly Digest
+
+on:
+  schedule:
+    - cron: '0 11 * * 0'  # 毎週日曜 11:00 UTC = 20:00 JST
+  workflow_dispatch:       # 手動実行にも対応
+
+jobs:
+  rss-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install feedparser==6.0.11
+
+      - name: Run RSS watcher
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python3 rss_watcher.py weekly
