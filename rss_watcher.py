@@ -5,6 +5,7 @@ RSS Watcher - Inoreader OPML巡回 → Slack DM通知
 - 緊急度高: 即時DM
 """
 
+import urllib.request
 import xml.etree.ElementTree as ET
 import feedparser
 import json
@@ -239,10 +240,26 @@ def format_urgent_alert(article):
 
 
 def post_to_slack(message):
-    """Claude Code MCP経由でSlack DM送信（外部呼び出し用にメッセージをprint）"""
-    # このスクリプトはメッセージを標準出力に出力し、
-    # Claude Codeがそれを読み取ってSlack APIで送信する
-    print(f"SLACK_DM:{SLACK_USER_ID}:{message}")
+    """Slack DM送信: SLACK_BOT_TOKEN環境変数があれば直接API呼び出し、なければprint"""
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if token:
+        data = json.dumps({
+            "channel": SLACK_USER_ID,
+            "text": message,
+            "mrkdwn": True
+        }).encode()
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            result = json.load(resp)
+        if not result.get("ok"):
+            print(f"Slack error: {result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"SLACK_DM:{SLACK_USER_ID}:{message}")
 
 
 def main(mode="weekly"):
