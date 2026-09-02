@@ -5,6 +5,7 @@ RSS Watcher - Inoreader OPML巡回 → Slack DM通知
 - 緊急度高: 即時DM
 """
 
+import ipaddress
 import urllib.request
 import xml.etree.ElementTree as ET
 import feedparser
@@ -13,15 +14,33 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 # === 設定 ===
 _SCRIPT_DIR = Path(__file__).parent
 OPML_PATH = str(_SCRIPT_DIR / "inoreader_feeds.xml")
 STATE_FILE = str(_SCRIPT_DIR / "seen_articles.json")
+ALLOWED_DOMAINS_FILE = str(_SCRIPT_DIR / "rss_allowed_domains.json")
 SLACK_USER_ID = "U7VTCQ0SF"
 
 # 優先カテゴリ（フィードを巡回する対象）
-TARGET_CATEGORIES = ["子供・業務アラート", "児発/放デイ/障害者GH", "チェック", "ニュース", "経済新聞"]
+# 「チェック」（古い個人ブログ群。幼保キーワードに当たらずスコア0で全捨てされる一方、
+# 死んだ/転売ドメインへの取得リスクが集中していた）は2026-09-02に対象から外した。
+TARGET_CATEGORIES = ["子供・業務アラート", "児発/放デイ/障害者GH", "ニュース", "経済新聞"]
+
+# フィード取得を許可するドメイン。`.jp` は常に許可。それ以外は下の既定＋
+# rss_allowed_domains.json に列挙したもの（登録可能ドメイン単位）だけ許可し、
+# 未知ホストは取得せずスキップする（collect_org_officers と同じ fail-closed 方針）。
+DEFAULT_ALLOWED_DOMAINS = frozenset({
+    "keizai.biz",        # みんなの経済新聞ネットワーク（国内・海外版）
+    "shibukei.com",      # シブヤ経済新聞
+    "feed43.com",        # 経済新聞・NewsPicks のRSS変換
+    "google.com",        # Google Alerts のRSSフィード
+    "feedburner.com",    # Google運営のRSSプロキシ
+    "economist.com",
+    "ft.com",
+    "ftchinese.com",
+})
 
 # スコアリングキーワード
 SCORE_KEYWORDS = {
@@ -63,6 +82,43 @@ URGENT_KEYWORDS = [
 ]
 
 JST = timezone(timedelta(hours=9))
+
+
+def load_allowed_domains():
+    """rss_allowed_domains.json（登録可能ドメインの配列）を既定に足して返す。"""
+    domains = set(DEFAULT_ALLOWED_DOMAINS)
+    try:
+        with open(ALLOWED_DOMAINS_FILE, encoding="utf-8") as f:
+            extra = json.load(f)
+        if isinstance(extra, list):
+            domains.update(d.strip().lower() for d in extra if isinstance(d, str) and d.strip())
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"allowed_domains 読み込み失敗（既定のみ使用）: {e}", file=sys.stderr)
+    return domains
+
+
+def is_feed_host_allowed(url, allowed_domains):
+    """フィードURLを取得してよいか、通信せず判定する（.jp または allowlist のみ）。"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return False
+    except ValueError:
+        pass
+    if host == "jp" or host.endswith(".jp"):
+        return True
+    return any(host == d or host.endswith("." + d) for d in allowed_domains)
 
 
 def load_seen_articles():
@@ -122,14 +178,27 @@ def is_urgent(title, summary=""):
     return any(kw in text for kw in URGENT_KEYWORDS)
 
 
-def fetch_articles(feeds, seen_ids, hours_back=168):
-    """直近N時間の未読記事を取得"""
+def fetch_articles(feeds, seen_ids, hours_back=168, allowed_domains=None):
+    """直近N時間の未読記事を取得（.jp / allowlist 外のフィードは取得しない）"""
+    if allowed_domains is None:
+        allowed_domains = load_allowed_domains()
     cutoff = datetime.now(JST) - timedelta(hours=hours_back)
     articles = []
+    skipped = 0
 
     for feed_info in feeds:
+        if not is_feed_host_allowed(feed_info["url"], allowed_domains):
+            skipped += 1
+            print(f"SKIP(domain not allowed): {feed_info['url']}", file=sys.stderr)
+            continue
         try:
             feed = feedparser.parse(feed_info["url"])
+            # リダイレクト後の最終URLも同じ基準で確認する
+            final_url = getattr(feed, "href", None)
+            if final_url and not is_feed_host_allowed(final_url, allowed_domains):
+                skipped += 1
+                print(f"SKIP(redirected off-allowlist): {feed_info['url']} -> {final_url}", file=sys.stderr)
+                continue
             for entry in feed.entries[:20]:
                 article_id = entry.get("id") or entry.get("link", "")
                 if article_id in seen_ids:
@@ -168,6 +237,8 @@ def fetch_articles(feeds, seen_ids, hours_back=168):
         except Exception as e:
             print(f"Error fetching {feed_info['url']}: {e}", file=sys.stderr)
 
+    if skipped:
+        print(f"ドメイン未許可でスキップ: {skipped}件", file=sys.stderr)
     return sorted(articles, key=lambda x: x["score"], reverse=True)
 
 
@@ -266,10 +337,11 @@ def main(mode="weekly"):
     # weekly は毎回フレッシュ実行（seen_articles不使用）
     seen = set() if mode == "weekly" else load_seen_articles()
     feeds = parse_opml_feeds()
-    print(f"対象フィード: {len(feeds)}件", file=sys.stderr)
+    allowed_domains = load_allowed_domains()
+    print(f"対象フィード: {len(feeds)}件 / 許可ドメイン(.jp除く): {len(allowed_domains)}件", file=sys.stderr)
 
     hours = 168 if mode == "weekly" else 1  # weekly=7日分、urgent=1時間分
-    articles = fetch_articles(feeds, seen, hours_back=hours)
+    articles = fetch_articles(feeds, seen, hours_back=hours, allowed_domains=allowed_domains)
     print(f"スコア2以上の記事: {len(articles)}件", file=sys.stderr)
 
     if mode == "weekly":
